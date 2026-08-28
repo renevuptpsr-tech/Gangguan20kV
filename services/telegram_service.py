@@ -10,7 +10,7 @@ from services.supabase_client import (
 )
 
 
-TELEGRAM_TEMPLATE_VERSION = "2026.08.24-v4-gangguan-frequency"
+TELEGRAM_TEMPLATE_VERSION = "2026.08.28-v8-gi-attention-mention"
 
 
 # ==========================================================
@@ -147,6 +147,218 @@ def _format_number(
         f"{formatted} {unit}"
         .strip()
     )
+
+
+# ==========================================================
+# GI TELEGRAM MENTION
+# ==========================================================
+
+
+def _load_gi_telegram_mentions(
+    hierarchy: dict[str, Any],
+) -> list[dict[str, str]]:
+    """
+    Mengambil contact Telegram resmi GI dari:
+
+    mst_unit_channel
+        channel_type = TELEGRAM
+
+    yang dipetakan ke GI melalui:
+
+    map_functloc_channel
+
+    Satu contact dapat dipakai oleh lebih dari satu GI.
+    Contoh:
+        GI 150 kV SIMANGKOK
+        GITET 275 kV SIMANGKOK
+
+    external_id dipakai sebagai Telegram user_id untuk mention.
+    """
+
+    gi_flc = str(
+        hierarchy.get(
+            "gi_flc"
+        )
+        or hierarchy.get(
+            "functloc_id"
+        )
+        or ""
+    ).strip()
+
+    if not gi_flc:
+        return []
+
+    try:
+        supabase = get_supabase_client()
+
+        # Lookup melalui SECURITY DEFINER RPC.
+        # Client Streamlit memakai role authenticated sehingga tidak perlu
+        # SELECT langsung ke tabel master channel yang memang tidak diekspos.
+        channel_response = (
+            supabase
+            .rpc(
+                "fn_get_gi_telegram_mentions",
+                {
+                    "p_functloc_id": gi_flc,
+                },
+            )
+            .execute()
+        )
+
+        channel_rows = cast(
+            list[dict[str, Any]],
+            channel_response.data
+            or [],
+        )
+
+        result: list[dict[str, str]] = []
+
+        for row in channel_rows:
+            external_id = str(
+                row.get(
+                    "external_id"
+                )
+                or ""
+            ).strip()
+
+            if not external_id:
+                continue
+
+            channel_value = str(
+                row.get(
+                    "channel_value"
+                )
+                or ""
+            ).strip()
+
+            result.append(
+                {
+                    "external_id": external_id,
+                    "channel_value": channel_value,
+                    "is_primary": str(
+                        bool(
+                            row.get(
+                                "is_primary"
+                            )
+                        )
+                    ),
+                }
+            )
+
+        result.sort(
+            key=lambda item: (
+                item.get(
+                    "is_primary"
+                )
+                != "True",
+                item.get(
+                    "channel_value"
+                )
+                or "",
+            )
+        )
+
+        return result
+
+    except Exception:
+        # Mention adalah informasi tambahan.
+        # Kegagalan lookup tidak boleh menggagalkan notifikasi utama.
+        return []
+
+
+def _build_gi_mention_lines(
+    hierarchy: dict[str, Any],
+    *,
+    context: str = "GANGGUAN",
+) -> list[str]:
+    """
+    Membuat mention Telegram untuk CONTACT RESMI GI.
+
+    Tujuannya bukan menampilkan label/tag administratif, tetapi membuat
+    awareness agar contact GI terkait mengetahui bahwa pesan bot tersebut
+    ditujukan kepada GI-nya.
+
+    Prioritas mention:
+    1. Jika channel_value adalah @username -> native @mention.
+    2. Jika tidak ada username -> inline mention menggunakan Telegram user_id
+       yang disimpan pada external_id melalui tg://user?id=<id>.
+
+    Contact berasal dari mapping functloc GI, bukan operator personal.
+    """
+
+    contacts = _load_gi_telegram_mentions(
+        hierarchy
+    )
+
+    if not contacts:
+        return []
+
+    gi_name = _safe_text(
+        hierarchy.get(
+            "gi_name"
+        )
+    )
+
+    mention_items: list[str] = []
+
+    for index, contact in enumerate(
+        contacts,
+        start=1,
+    ):
+        external_id = str(
+            contact.get(
+                "external_id"
+            )
+            or ""
+        ).strip()
+
+        channel_value = _safe_text(
+            contact.get(
+                "channel_value"
+            ),
+            default=gi_name,
+        )
+
+        if channel_value.startswith("@"):
+            mention_items.append(
+                _escape_html(channel_value)
+            )
+            continue
+
+        if external_id:
+            label = (
+                gi_name
+                if len(contacts) == 1
+                else (
+                    channel_value
+                    if channel_value != "-"
+                    else f"{gi_name} {index}"
+                )
+            )
+
+            mention_items.append(
+                (
+                    f'<a href="tg://user?id={_escape_html(external_id)}">'
+                    f'{_escape_html(label)}</a>'
+                )
+            )
+            continue
+
+        # Seharusnya tidak terjadi karena RPC hanya mengembalikan external_id
+        # yang terisi. Fallback ini mencegah notifikasi utama gagal.
+        mention_items.append(
+            _escape_html(channel_value)
+        )
+
+    # Mention berfungsi seperti CC pada email: hanya memberi awareness
+    # kepada contact resmi GI terkait, tanpa kalimat perintah tambahan.
+    return [
+        "",
+        (
+            "📌 <b>CC:</b> "
+            + " | ".join(mention_items)
+        ),
+    ]
 
 
 # ==========================================================
@@ -1170,6 +1382,21 @@ def build_event_message(
             f"{_escape_html(hierarchy.get('penyulang_code') or '-')} — "
             f"{_escape_html(hierarchy.get('penyulang_name') or '-')}"
         ),
+    ]
+
+    lines.extend(
+        _build_gi_mention_lines(
+            hierarchy,
+            context=(
+                "GANGGUAN"
+                if is_gangguan
+                else "MANUVER"
+            ),
+        )
+    )
+
+    lines.extend(
+        [
         "",
         "👥 <b>Petugas Operasi</b>",
         (
@@ -1214,7 +1441,8 @@ def build_event_message(
             "⚡ <b>Tegangan:</b> "
             f"{_format_number(payload.get('voltage_before_kv'), 'kV')}"
         ),
-    ]
+        ]
+    )
 
     lines.extend(
         _build_affected_area_lines(
@@ -1283,117 +1511,10 @@ def build_event_message(
             ]
         )
 
-        recovery_status_code = str(
-            payload.get(
-                "recovery_status_code"
-            )
-            or ""
-        ).strip().upper()
-
-        supply_status_code = str(
-            payload.get(
-                "supply_status_code"
-            )
-            or "BELUM"
-        ).strip().upper()
-
-        has_direct_recovery = (
-            recovery_status_code
-            not in {
-                "",
-                "BELUM",
-            }
-            or supply_status_code
-            not in {
-                "",
-                "BELUM",
-            }
-            or bool(
-                payload.get(
-                    "final_supply_normalized"
-                )
-            )
-        )
-
-        if has_direct_recovery:
-            supply_datetime = (
-                f"{payload.get('supply_restored_date') or '-'} "
-                f"{payload.get('supply_restored_time') or '-'}"
-            ).strip()
-
-            recovery_datetime = (
-                f"{payload.get('recovery_date') or '-'} "
-                f"{payload.get('recovery_time') or '-'}"
-            ).strip()
-
-            lines.extend(
-                [
-                    "",
-                    "✅ <b>Pemulihan / Normalisasi</b>",
-                    (
-                        "• Status Suplai: "
-                        f"{_escape_html(payload.get('supply_status_code') or '-')}"
-                    ),
-                    (
-                        "• Mulai Tersuplai: "
-                        f"{_escape_html(supply_datetime)}"
-                    ),
-                ]
-            )
-
-            lines.extend(
-                _build_maneuver_current_lines(
-                    payload,
-                    bullet="• ",
-                )
-            )
-
-            lines.extend(
-                [
-                    (
-                        "• Status PMT Akhir: "
-                        f"{_escape_html(payload.get('recovery_status_code') or '-')}"
-                    ),
-                    (
-                        "• Waktu Operasi PMT: "
-                        f"{_escape_html(recovery_datetime)}"
-                    ),
-                    (
-                        "• Counter PMT: "
-                        f"{_escape_html(payload.get('pmt_counter_after') if payload.get('pmt_counter_after') is not None else '-')}"
-                    ),
-                    (
-                        "• Arus Setelah: "
-                        + _format_three_phase_current(
-                            payload,
-                            prefix="load_current_after",
-                            legacy_field="load_current_after_a",
-                        )
-                    ),
-                    (
-                        "• Tegangan Setelah: "
-                        f"{_format_number(payload.get('voltage_after_kv'), 'kV')}"
-                    ),
-                ]
-            )
-
-            recovery_description = str(
-                payload.get(
-                    "recovery_description"
-                )
-                or ""
-            ).strip()
-
-            if recovery_description:
-                lines.extend(
-                    [
-                        "",
-                        "📝 <b>Keterangan Pemulihan:</b>",
-                        _escape_html(
-                            recovery_description
-                        ),
-                    ]
-                )
+        # Pemulihan/normalisasi sengaja TIDAK ditempel pada pesan awal
+        # gangguan. Aplikasi mengirim notifikasi pemulihan melalui
+        # send_recovery_notification(), sehingga satu kejadian tidak
+        # menghasilkan dua blok pemulihan yang sama.
 
     if not is_gangguan:
         maneuver_lines = (
@@ -1438,10 +1559,16 @@ def build_event_message(
     )
 
     if description:
+        description_title = (
+            "🧾 <b>Kronologi Gangguan</b>"
+            if is_gangguan
+            else "📝 <b>Keterangan Manuver</b>"
+        )
+
         lines.extend(
             [
                 "",
-                "📄 <b>Keterangan:</b>",
+                description_title,
                 _escape_html(
                     description
                 ),
@@ -1622,6 +1749,13 @@ def build_recovery_message(
     ]
 
     lines.extend(
+        _build_gi_mention_lines(
+            event_row,
+            context="PEMULIHAN",
+        )
+    )
+
+    lines.extend(
         _build_affected_area_lines(
             event_row
         )
@@ -1681,7 +1815,19 @@ def build_recovery_message(
                 f"{_escape_html(recovery_payload.get('pmt_counter_after') if recovery_payload.get('pmt_counter_after') is not None else '-')}"
             ),
             "",
-            "📝 <b>Keterangan Pemulihan:</b>",
+            (
+                "📝 <b>Keterangan Normalisasi:</b>"
+                if str(
+                    event_row.get(
+                        "event_type_code"
+                    )
+                    or event_row.get(
+                        "event_type"
+                    )
+                    or ""
+                ).strip().upper() == "MANUVER"
+                else "📝 <b>Keterangan Pemulihan / Normalisasi:</b>"
+            ),
             _escape_html(
                 recovery_payload.get(
                     "recovery_description"
