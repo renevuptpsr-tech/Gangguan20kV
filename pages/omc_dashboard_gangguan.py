@@ -6248,7 +6248,7 @@ def _render_wallboard() -> None:
       <div class="omc-top-card omc-top-brand">
         {brand_logo_html}
         <div class="brand-copy">
-          <div class="brand-title">DASHBOARD GANGGUAN</div>
+          <div class="brand-title">DASHBOARD OMC GANGGUAN FEEDER 20KV</div>
           <div class="brand-subtitle">
             UPT PEMATANG SIANTAR • {escape(scope_label)}
           </div>
