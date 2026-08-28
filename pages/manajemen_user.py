@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import csv
+import io
+import re
 from typing import Any
 
 import streamlit as st
@@ -13,6 +16,7 @@ from services.access_service import (
 from services.auth_service import is_authenticated
 from services.user_management_service import (
     add_multiple_user_assignments,
+    bulk_create_users,
     clear_user_management_cache,
     create_user,
     get_assignable_roles,
@@ -41,6 +45,11 @@ KEY_SEARCH = "mu_search"
 KEY_STATUS_FILTER = "mu_status_filter"
 KEY_FORM_MODE = "mu_form_mode"
 KEY_FORM_NOTICE = "mu_form_notice"
+
+FORM_MODE_NONE = "NONE"
+FORM_MODE_CREATE = "CREATE"
+FORM_MODE_EDIT = "EDIT"
+FORM_MODE_BULK = "BULK"
 
 
 def _text(
@@ -429,7 +438,7 @@ def _render_user_table(
 
                     st.session_state[
                         KEY_FORM_MODE
-                    ] = "NONE"
+                    ] = FORM_MODE_NONE
 
     selected = (
         st.session_state.get(
@@ -442,6 +451,1233 @@ def _render_user_table(
         if selected
         else None
     )
+
+
+# ==========================================================
+# BULK IMPORT USER
+# ==========================================================
+
+
+def _bulk_normalize(
+    value: Any,
+) -> str:
+    return re.sub(
+        r"\s+",
+        " ",
+        str(
+            value
+            or ""
+        ).strip().casefold(),
+    )
+
+
+def _bulk_split(
+    value: Any,
+) -> list[str]:
+    """
+    Memisahkan multiple value dari Google Sheets.
+
+    Mendukung:
+    - koma:
+        INSPECTOR, MONITORING
+
+    - pipe:
+        INSPECTOR | MONITORING
+
+    - baris baru:
+        INSPECTOR
+        MONITORING
+    """
+
+    text = str(
+        value
+        or ""
+    ).strip()
+
+    if not text:
+        return []
+
+    result: list[str] = []
+
+    parts = re.split(
+        r"\s*(?:\||,|\n)\s*",
+        text,
+    )
+
+    for item in parts:
+        cleaned = str(
+            item
+            or ""
+        ).strip()
+
+        if (
+            cleaned
+            and cleaned not in result
+        ):
+            result.append(
+                cleaned
+            )
+
+    return result
+
+def _bulk_parse_rows(
+    raw_text: str,
+) -> list[dict[str, Any]]:
+    """
+    Membaca hasil copy-paste Google Sheets dalam format TSV.
+
+    Kolom:
+    Email | Nama Lengkap | NIP | Jabatan | Role | Unit Access
+    """
+
+    text = str(
+        raw_text
+        or ""
+    ).strip()
+
+    if not text:
+        return []
+
+    rows = list(
+        csv.reader(
+            io.StringIO(
+                text
+            ),
+            delimiter="\t",
+        )
+    )
+
+    if not rows:
+        return []
+
+    headers = [
+        _bulk_normalize(
+            item
+        )
+        for item in rows[0]
+    ]
+
+    aliases = {
+        "email": [
+            "email",
+        ],
+        "full_name": [
+            "nama lengkap",
+            "nama",
+            "full name",
+        ],
+        "employee_id": [
+            "nip",
+            "employee id",
+            "employee_id",
+            "nip / employee id",
+        ],
+        "position_name": [
+            "jabatan",
+            "position",
+            "position name",
+        ],
+        "role_values": [
+            "role",
+            "roles",
+        ],
+        "scope_values": [
+            "unit access",
+            "unit",
+            "scope",
+            "scope unit",
+        ],
+    }
+
+    column_map: dict[str, int] = {}
+
+    for field_name, names in (
+        aliases.items()
+    ):
+        for name in names:
+            normalized = (
+                _bulk_normalize(
+                    name
+                )
+            )
+
+            if normalized in headers:
+                column_map[
+                    field_name
+                ] = headers.index(
+                    normalized
+                )
+                break
+
+    missing = [
+        field_name
+        for field_name
+        in aliases
+        if field_name
+        not in column_map
+    ]
+
+    if missing:
+        labels = {
+            "email":
+                "Email",
+            "full_name":
+                "Nama Lengkap",
+            "employee_id":
+                "NIP",
+            "position_name":
+                "Jabatan",
+            "role_values":
+                "Role",
+            "scope_values":
+                "Unit Access",
+        }
+
+        raise ValueError(
+            "Kolom wajib belum lengkap: "
+            + ", ".join(
+                labels[
+                    field_name
+                ]
+                for field_name
+                in missing
+            )
+        )
+
+    result: list[
+        dict[str, Any]
+    ] = []
+
+    for row_number, row in enumerate(
+        rows[1:],
+        start=2,
+    ):
+        if not any(
+            str(
+                value
+                or ""
+            ).strip()
+            for value in row
+        ):
+            continue
+
+        def cell(
+            field_name: str,
+        ) -> str:
+            index = column_map[
+                field_name
+            ]
+
+            if index >= len(row):
+                return ""
+
+            return str(
+                row[index]
+                or ""
+            ).strip()
+
+        result.append(
+            {
+                "row_number":
+                    row_number,
+
+                "email":
+                    cell(
+                        "email"
+                    ).lower(),
+
+                "full_name":
+                    cell(
+                        "full_name"
+                    ),
+
+                "employee_id":
+                    cell(
+                        "employee_id"
+                    )
+                    or None,
+
+                "position_name":
+                    cell(
+                        "position_name"
+                    )
+                    or None,
+
+                "role_values":
+                    _bulk_split(
+                        cell(
+                            "role_values"
+                        )
+                    ),
+
+                "scope_values":
+                    _bulk_split(
+                        cell(
+                            "scope_values"
+                        )
+                    ),
+            }
+        )
+
+    return result
+
+
+def _bulk_role_lookup(
+    role_map: dict[
+        str,
+        dict[str, Any],
+    ],
+) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+
+    for role_code, row in (
+        role_map.items()
+    ):
+        code = str(
+            role_code
+            or ""
+        ).strip().upper()
+
+        if not code:
+            continue
+
+        lookup[
+            _bulk_normalize(
+                code
+            )
+        ] = code
+
+        role_name = str(
+            row.get(
+                "role_name"
+            )
+            or ""
+        ).strip()
+
+        if role_name:
+            lookup[
+                _bulk_normalize(
+                    role_name
+                )
+            ] = code
+
+    return lookup
+
+
+def _bulk_scope_lookup(
+    functloc_map: dict[
+        str,
+        dict[str, Any],
+    ],
+) -> dict[str, str]:
+    """
+    Scope dapat ditulis menggunakan functloc_id,
+    short_name, location_name, atau unit_name.
+
+    Nama ambigu sengaja tidak diterima agar tidak salah scope.
+    """
+
+    lookup: dict[str, str] = {}
+    ambiguous: set[str] = set()
+
+    for functloc_id, row in (
+        functloc_map.items()
+    ):
+        code = str(
+            functloc_id
+            or ""
+        ).strip()
+
+        if not code:
+            continue
+
+        values = [
+            code,
+            row.get(
+                "short_name"
+            ),
+            row.get(
+                "location_name"
+            ),
+            row.get(
+                "unit_name"
+            ),
+        ]
+
+        for value in values:
+            key = (
+                _bulk_normalize(
+                    value
+                )
+            )
+
+            if not key:
+                continue
+
+            existing = lookup.get(
+                key
+            )
+
+            if (
+                existing
+                and existing != code
+            ):
+                ambiguous.add(
+                    key
+                )
+                continue
+
+            lookup[
+                key
+            ] = code
+
+    for key in ambiguous:
+        lookup.pop(
+            key,
+            None,
+        )
+
+    return lookup
+
+
+def _bulk_validate_rows(
+    rows: list[
+        dict[str, Any]
+    ],
+    role_map: dict[
+        str,
+        dict[str, Any],
+    ],
+    functloc_map: dict[
+        str,
+        dict[str, Any],
+    ],
+    existing_users: list[
+        dict[str, Any]
+    ],
+) -> list[dict[str, Any]]:
+    role_lookup = (
+        _bulk_role_lookup(
+            role_map
+        )
+    )
+
+    scope_lookup = (
+        _bulk_scope_lookup(
+            functloc_map
+        )
+    )
+
+    existing_emails = {
+        _bulk_normalize(
+            row.get(
+                "email"
+            )
+        )
+        for row
+        in existing_users
+        if str(
+            row.get(
+                "email"
+            )
+            or ""
+        ).strip()
+    }
+
+    seen_emails: set[str] = set()
+
+    validated: list[
+        dict[str, Any]
+    ] = []
+
+    for row in rows:
+        errors: list[str] = []
+
+        email = str(
+            row.get(
+                "email"
+            )
+            or ""
+        ).strip().lower()
+
+        email_key = (
+            _bulk_normalize(
+                email
+            )
+        )
+
+        full_name = str(
+            row.get(
+                "full_name"
+            )
+            or ""
+        ).strip()
+
+        if (
+            not email
+            or "@" not in email
+        ):
+            errors.append(
+                "Email tidak valid."
+            )
+
+        if (
+            email_key
+            in seen_emails
+        ):
+            errors.append(
+                "Email duplikat di data Bulk."
+            )
+
+        if (
+            email_key
+            in existing_emails
+        ):
+            errors.append(
+                "User sudah terdaftar."
+            )
+
+        seen_emails.add(
+            email_key
+        )
+
+        if not full_name:
+            errors.append(
+                "Nama Lengkap kosong."
+            )
+
+        role_codes: list[str] = []
+
+        for role_value in (
+            row.get(
+                "role_values"
+            )
+            or []
+        ):
+            resolved_role = (
+                role_lookup.get(
+                    _bulk_normalize(
+                        role_value
+                    )
+                )
+            )
+
+            if resolved_role:
+                if (
+                    resolved_role
+                    not in role_codes
+                ):
+                    role_codes.append(
+                        resolved_role
+                    )
+
+            else:
+                errors.append(
+                    "Role tidak dikenal: "
+                    f"{role_value}"
+                )
+
+        if not role_codes:
+            errors.append(
+                "Role belum diisi."
+            )
+
+        has_super_admin = (
+            "SUPER_ADMIN"
+            in role_codes
+        )
+
+        if (
+            has_super_admin
+            and len(
+                role_codes
+            ) > 1
+        ):
+            errors.append(
+                "SUPER_ADMIN tidak boleh "
+                "digabung dengan role lain."
+            )
+
+        functloc_ids: list[str] = []
+
+        for scope_value in (
+            row.get(
+                "scope_values"
+            )
+            or []
+        ):
+            resolved_scope = (
+                scope_lookup.get(
+                    _bulk_normalize(
+                        scope_value
+                    )
+                )
+            )
+
+            if resolved_scope:
+                if (
+                    resolved_scope
+                    not in functloc_ids
+                ):
+                    functloc_ids.append(
+                        resolved_scope
+                    )
+
+            else:
+                errors.append(
+                    "Unit Access tidak dikenal "
+                    "atau ambigu: "
+                    f"{scope_value}"
+                )
+
+        if (
+            not has_super_admin
+            and not functloc_ids
+        ):
+            errors.append(
+                "Unit Access belum diisi."
+            )
+
+        if has_super_admin:
+            functloc_ids = []
+
+        assignment_count = (
+            1
+            if has_super_admin
+            else (
+                len(
+                    role_codes
+                )
+                * len(
+                    functloc_ids
+                )
+            )
+        )
+
+        validated.append(
+            {
+                **row,
+
+                "email":
+                    email,
+
+                "full_name":
+                    full_name,
+
+                "role_codes":
+                    role_codes,
+
+                "functloc_ids":
+                    functloc_ids,
+
+                "role_display":
+                    " | ".join(
+                        role_codes
+                    ),
+
+                "scope_display":
+                    (
+                        "Global"
+                        if has_super_admin
+                        else " | ".join(
+                            functloc_ids
+                        )
+                    ),
+
+                "assignment_count":
+                    assignment_count,
+
+                "valid":
+                    not errors,
+
+                "errors":
+                    errors,
+            }
+        )
+
+    return validated
+
+
+def _render_bulk_results() -> None:
+    results = st.session_state.get(
+        "mu_import_results",
+        [],
+    )
+
+    if not results:
+        return
+
+    st.markdown(
+        "### Hasil Bulk Import"
+    )
+
+    success_count = sum(
+        1
+        for row
+        in results
+        if row.get(
+            "status"
+        )
+        == "Berhasil"
+    )
+
+    failed_count = (
+        len(results)
+        - success_count
+    )
+
+    c1, c2 = st.columns(
+        2
+    )
+
+    with c1:
+        st.metric(
+            "Berhasil",
+            success_count,
+        )
+
+    with c2:
+        st.metric(
+            "Gagal",
+            failed_count,
+        )
+
+    st.dataframe(
+        [
+            {
+                "Baris":
+                    row.get(
+                        "row_number"
+                    ),
+
+                "Email":
+                    row.get(
+                        "email"
+                    ),
+
+                "Status":
+                    row.get(
+                        "status"
+                    ),
+
+                "Assignment":
+                    int(
+                        row.get(
+                            "assignment_count"
+                        )
+                        or 0
+                    ),
+
+                "Keterangan":
+                    row.get(
+                        "message"
+                    ),
+            }
+            for row in results
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    if st.button(
+        "Tutup Hasil",
+        key="mu_import_close_result",
+    ):
+        st.session_state.pop(
+            "mu_import_results",
+            None,
+        )
+
+        st.rerun()
+
+
+def _render_bulk_import_form(
+    users: list[dict[str, Any]],
+) -> None:
+    st.subheader(
+        "Bulk Import User"
+    )
+
+    st.caption(
+        "Copy data langsung dari Google Sheets. "
+        "Satu baris mewakili satu user. "
+        "Gunakan tanda | untuk multiple Role atau Unit Access."
+    )
+
+    try:
+        (
+            role_map,
+            functloc_map,
+        ) = _load_form_masters()
+
+    except Exception as exc:
+        st.error(
+            "Master Role / Unit Access tidak dapat dibaca."
+        )
+        st.exception(
+            exc
+        )
+        return
+
+    with st.expander(
+        "Lihat Format Google Sheets",
+        expanded=False,
+    ):
+        st.code(
+            (
+                "Email\t"
+                "Nama Lengkap\t"
+                "NIP\t"
+                "Jabatan\t"
+                "Role\t"
+                "Unit Access\n"
+                "user1@pln.co.id\t"
+                "Nama User 1\t"
+                "12345\t"
+                "Officer\t"
+                "INSPECTOR | MONITORING\t"
+                "ULTG SIDIKALANG | ULTG TOBA"
+            ),
+            language="text",
+        )
+
+        st.caption(
+            "Role dan Unit Access akan divalidasi "
+            "terhadap master yang tersedia pada aplikasi."
+        )
+
+    with st.container(
+        border=True
+    ):
+        p1, p2 = st.columns(
+            2
+        )
+
+        with p1:
+            password = st.text_input(
+                "Password Awal *",
+                type="password",
+                help=(
+                    "Password digunakan untuk seluruh user "
+                    "yang berhasil diimport. Minimal 8 karakter."
+                ),
+                key="mu_import_password",
+            )
+
+        with p2:
+            confirm_password = st.text_input(
+                "Konfirmasi Password Awal *",
+                type="password",
+                key="mu_import_confirm_password",
+            )
+
+        o1, o2 = st.columns(
+            2
+        )
+
+        with o1:
+            include_children = st.checkbox(
+                "Termasuk unit di bawah scope",
+                value=True,
+                key="mu_import_children",
+            )
+
+        with o2:
+            is_active = st.toggle(
+                "User Aktif",
+                value=True,
+                key="mu_import_active",
+            )
+
+        raw_text = st.text_area(
+            "Paste Data Google Sheets *",
+            height=260,
+            placeholder=(
+                "Klik sel pertama di Google Sheets, "
+                "copy tabel, lalu paste di sini..."
+            ),
+            key="mu_import_raw",
+        )
+
+        b1, b2 = st.columns(
+            [1.5, 4.5]
+        )
+
+        with b1:
+            validate = st.button(
+                "Validasi Data",
+                type="primary",
+                use_container_width=True,
+                key="mu_import_validate",
+            )
+
+        with b2:
+            cancel = st.button(
+                "Batal",
+                key="mu_import_cancel",
+            )
+
+    if cancel:
+        st.session_state[
+            KEY_FORM_MODE
+        ] = FORM_MODE_NONE
+
+        st.session_state.pop(
+            "mu_import_validation",
+            None,
+        )
+
+        st.rerun()
+
+    if validate:
+        try:
+            if len(
+                password
+            ) < 8:
+                raise ValueError(
+                    "Password awal minimal 8 karakter."
+                )
+
+            if (
+                password
+                != confirm_password
+            ):
+                raise ValueError(
+                    "Konfirmasi Password Awal tidak sesuai."
+                )
+
+            parsed_rows = (
+                _bulk_parse_rows(
+                    raw_text
+                )
+            )
+
+            if not parsed_rows:
+                raise ValueError(
+                    "Tidak ada data user yang ditemukan."
+                )
+
+            if len(
+                parsed_rows
+            ) > 100:
+                raise ValueError(
+                    "Maksimal 100 user per proses Bulk Import."
+                )
+
+            validated_rows = (
+                _bulk_validate_rows(
+                    parsed_rows,
+                    role_map,
+                    functloc_map,
+                    users,
+                )
+            )
+
+            st.session_state[
+                "mu_import_validation"
+            ] = validated_rows
+
+            st.rerun()
+
+        except Exception as exc:
+            st.error(
+                str(exc)
+            )
+            return
+
+    validated_rows = (
+        st.session_state.get(
+            "mu_import_validation",
+            [],
+        )
+    )
+
+    if not validated_rows:
+        return
+
+    valid_rows = [
+        row
+        for row
+        in validated_rows
+        if bool(
+            row.get(
+                "valid"
+            )
+        )
+    ]
+
+    invalid_rows = [
+        row
+        for row
+        in validated_rows
+        if not bool(
+            row.get(
+                "valid"
+            )
+        )
+    ]
+
+    st.divider()
+
+    c1, c2, c3, c4 = st.columns(
+        4
+    )
+
+    with c1:
+        st.metric(
+            "Total Data",
+            len(
+                validated_rows
+            ),
+        )
+
+    with c2:
+        st.metric(
+            "Valid",
+            len(
+                valid_rows
+            ),
+        )
+
+    with c3:
+        st.metric(
+            "Bermasalah",
+            len(
+                invalid_rows
+            ),
+        )
+
+    with c4:
+        st.metric(
+            "Assignment",
+            sum(
+                int(
+                    row.get(
+                        "assignment_count"
+                    )
+                    or 0
+                )
+                for row
+                in valid_rows
+            ),
+        )
+
+    if valid_rows:
+        st.markdown(
+            "#### Preview User Valid"
+        )
+
+        st.dataframe(
+            [
+                {
+                    "Baris":
+                        row.get(
+                            "row_number"
+                        ),
+
+                    "Email":
+                        row.get(
+                            "email"
+                        ),
+
+                    "Nama":
+                        row.get(
+                            "full_name"
+                        ),
+
+                    "NIP":
+                        row.get(
+                            "employee_id"
+                        )
+                        or "-",
+
+                    "Jabatan":
+                        row.get(
+                            "position_name"
+                        )
+                        or "-",
+
+                    "Role":
+                        row.get(
+                            "role_display"
+                        ),
+
+                    "Unit Access":
+                        row.get(
+                            "scope_display"
+                        ),
+
+                    "Assignment":
+                        row.get(
+                            "assignment_count"
+                        ),
+                }
+                for row in valid_rows
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    if invalid_rows:
+        st.markdown(
+            "#### Data Bermasalah"
+        )
+
+        st.dataframe(
+            [
+                {
+                    "Baris":
+                        row.get(
+                            "row_number"
+                        ),
+
+                    "Email":
+                        row.get(
+                            "email"
+                        )
+                        or "-",
+
+                    "Nama":
+                        row.get(
+                            "full_name"
+                        )
+                        or "-",
+
+                    "Masalah":
+                        " ".join(
+                            row.get(
+                                "errors"
+                            )
+                            or []
+                        ),
+                }
+                for row in invalid_rows
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.warning(
+            "Baris bermasalah tidak akan diimport. "
+            "Perbaiki data lalu lakukan Validasi Data kembali "
+            "jika ingin memasukkannya."
+        )
+
+    if not valid_rows:
+        return
+
+    st.divider()
+
+    if st.button(
+        f"Import {len(valid_rows)} User Valid",
+        icon=":material/upload:",
+        type="primary",
+        use_container_width=True,
+        key="mu_import_execute",
+    ):
+        if len(
+            password
+        ) < 8:
+            st.error(
+                "Password awal minimal 8 karakter."
+            )
+            return
+
+        if (
+            password
+            != confirm_password
+        ):
+            st.error(
+                "Konfirmasi Password Awal tidak sesuai."
+            )
+            return
+
+        progress = st.progress(
+            0,
+            text="Menyiapkan Bulk Import...",
+        )
+
+        status_box = st.empty()
+
+        results: list[
+            dict[str, Any]
+        ] = []
+
+        total = len(
+            valid_rows
+        )
+
+        for index, row in enumerate(
+            valid_rows,
+            start=1,
+        ):
+            status_box.info(
+                f"Membuat user {index}/{total}: "
+                f"{row.get('email')}"
+            )
+
+            result = bulk_create_users(
+                rows=[
+                    row
+                ],
+                password=password,
+                include_children=(
+                    include_children
+                ),
+                is_active=is_active,
+            )
+
+            results.extend(
+                result
+            )
+
+            progress.progress(
+                index / total,
+                text=(
+                    f"Import {index}/{total}"
+                ),
+            )
+
+        progress.empty()
+        status_box.empty()
+
+        clear_user_management_cache()
+
+        st.session_state[
+            "mu_import_results"
+        ] = results
+
+        st.session_state.pop(
+            "mu_import_validation",
+            None,
+        )
+
+        st.session_state[
+            KEY_FORM_MODE
+        ] = FORM_MODE_NONE
+
+        success_count = sum(
+            1
+            for row
+            in results
+            if row.get(
+                "status"
+            )
+            == "Berhasil"
+        )
+
+        failed_count = (
+            len(results)
+            - success_count
+        )
+
+        _set_notice(
+            "Bulk Import selesai. "
+            f"{success_count} user berhasil dan "
+            f"{failed_count} user gagal."
+        )
+
+        st.rerun()
 
 
 def _render_access_list(
@@ -905,7 +2141,7 @@ def _render_create_user_form() -> None:
             ):
                 st.session_state[
                     KEY_FORM_MODE
-                ] = "NONE"
+                ] = FORM_MODE_NONE
                 st.rerun()
 
         if save:
@@ -996,7 +2232,7 @@ def _render_create_user_form() -> None:
 
                 st.session_state[
                     KEY_FORM_MODE
-                ] = "NONE"
+                ] = FORM_MODE_NONE
 
                 _set_notice(
                     "User berhasil dibuat langsung pada Supabase Auth. "
@@ -1348,7 +2584,7 @@ def _render_edit_user_form(
             ):
                 st.session_state[
                     KEY_FORM_MODE
-                ] = "NONE"
+                ] = FORM_MODE_NONE
                 st.rerun()
 
         if save:
@@ -1457,7 +2693,7 @@ def _render_edit_user_form(
 
                 st.session_state[
                     KEY_FORM_MODE
-                ] = "NONE"
+                ] = FORM_MODE_NONE
 
                 _set_notice(
                     "Perubahan user berhasil disimpan. "
@@ -1553,14 +2789,14 @@ def _render_selected_user(
         ):
             st.session_state[
                 KEY_FORM_MODE
-            ] = "EDIT"
+            ] = FORM_MODE_EDIT
             st.rerun()
 
     if (
         st.session_state.get(
             KEY_FORM_MODE
         )
-        == "EDIT"
+        == FORM_MODE_EDIT
     ):
         st.divider()
 
@@ -1590,7 +2826,7 @@ def render_page() -> None:
     _render_notice()
 
     h1, h2 = st.columns(
-        [5.5, 1.35]
+        [4.8, 2.2]
     )
 
     with h1:
@@ -1599,31 +2835,64 @@ def render_page() -> None:
         )
 
         st.caption(
-            "Kelola user, multiple Role, dan multiple "
-            "Unit Access secara terpusat."
+            "Kelola user, multiple Role, multiple Unit Access, "
+            "dan Bulk Import dari Google Sheets."
         )
 
     with h2:
         st.write("")
         st.write("")
 
-        if st.button(
-            "Tambah User",
-            icon=":material/person_add:",
-            type="primary",
-            use_container_width=True,
-            key="mu_add_user",
-        ):
-            st.session_state[
-                KEY_FORM_MODE
-            ] = "CREATE"
+        b1, b2 = st.columns(
+            2
+        )
 
-            st.session_state.pop(
-                KEY_SELECTED_USER,
-                None,
-            )
+        with b1:
+            if st.button(
+                "Tambah User",
+                icon=":material/person_add:",
+                type="primary",
+                use_container_width=True,
+                key="mu_add_user",
+            ):
+                st.session_state[
+                    KEY_FORM_MODE
+                ] = FORM_MODE_CREATE
 
-            st.rerun()
+                st.session_state.pop(
+                    KEY_SELECTED_USER,
+                    None,
+                )
+
+                st.session_state.pop(
+                    "mu_import_validation",
+                    None,
+                )
+
+                st.rerun()
+
+        with b2:
+            if st.button(
+                "Bulk Import",
+                icon=":material/upload:",
+                use_container_width=True,
+                key="mu_open_bulk_import",
+            ):
+                st.session_state[
+                    KEY_FORM_MODE
+                ] = FORM_MODE_BULK
+
+                st.session_state.pop(
+                    KEY_SELECTED_USER,
+                    None,
+                )
+
+                st.session_state.pop(
+                    "mu_import_validation",
+                    None,
+                )
+
+                st.rerun()
 
     try:
         users = get_users()
@@ -1639,15 +2908,31 @@ def render_page() -> None:
         users
     )
 
+    _render_bulk_results()
+
     st.divider()
 
-    if (
+    current_mode = (
         st.session_state.get(
-            KEY_FORM_MODE
+            KEY_FORM_MODE,
+            FORM_MODE_NONE,
         )
-        == "CREATE"
+    )
+
+    if (
+        current_mode
+        == FORM_MODE_CREATE
     ):
         _render_create_user_form()
+        st.divider()
+
+    elif (
+        current_mode
+        == FORM_MODE_BULK
+    ):
+        _render_bulk_import_form(
+            users
+        )
         st.divider()
 
     f1, f2, f3 = st.columns(
@@ -1709,12 +2994,10 @@ def render_page() -> None:
     )
 
     if not selected_user_id:
-        if (
-            st.session_state.get(
-                KEY_FORM_MODE
-            )
-            != "CREATE"
-        ):
+        if current_mode not in {
+            FORM_MODE_CREATE,
+            FORM_MODE_BULK,
+        }:
             st.info(
                 "Klik satu baris user untuk melihat "
                 "dan mengelola access."

@@ -479,6 +479,147 @@ def create_user(
 
 
 
+def bulk_create_users(
+    *,
+    rows: list[dict[str, Any]],
+    password: str,
+    include_children: bool = True,
+    is_active: bool = True,
+) -> list[dict[str, Any]]:
+    """
+    Membuat beberapa user sekaligus menggunakan create_user()
+    yang sudah ada.
+
+    Satu kegagalan tidak menghentikan user lainnya.
+    """
+
+    _require_manage_access()
+
+    password_clean = str(
+        password
+        or ""
+    )
+
+    if len(password_clean) < 8:
+        raise ValueError(
+            "Password awal minimal 8 karakter."
+        )
+
+    results: list[dict[str, Any]] = []
+
+    for row in rows:
+        row_number = int(
+            row.get("row_number")
+            or 0
+        )
+
+        email = str(
+            row.get("email")
+            or ""
+        ).strip().lower()
+
+        try:
+            result = create_user(
+                email=email,
+                password=password_clean,
+                full_name=str(
+                    row.get("full_name")
+                    or ""
+                ).strip(),
+                employee_id=(
+                    str(
+                        row.get("employee_id")
+                        or ""
+                    ).strip()
+                    or None
+                ),
+                position_name=(
+                    str(
+                        row.get("position_name")
+                        or ""
+                    ).strip()
+                    or None
+                ),
+                role_codes=[
+                    str(item)
+                    for item in (
+                        row.get("role_codes")
+                        or []
+                    )
+                ],
+                functloc_ids=[
+                    str(item)
+                    for item in (
+                        row.get("functloc_ids")
+                        or []
+                    )
+                ],
+                include_children=bool(
+                    include_children
+                ),
+                is_active=bool(
+                    is_active
+                ),
+            )
+
+            results.append(
+                {
+                    "row_number":
+                        row_number,
+
+                    "email":
+                        email,
+
+                    "status":
+                        "Berhasil",
+
+                    "message":
+                        "User berhasil dibuat.",
+
+                    "user_id":
+                        str(
+                            result.get("user_id")
+                            or ""
+                        ).strip(),
+
+                    "assignment_count":
+                        int(
+                            result.get(
+                                "assignment_count"
+                            )
+                            or 0
+                        ),
+                }
+            )
+
+        except Exception as exc:
+            results.append(
+                {
+                    "row_number":
+                        row_number,
+
+                    "email":
+                        email,
+
+                    "status":
+                        "Gagal",
+
+                    "message":
+                        str(exc),
+
+                    "user_id":
+                        "",
+
+                    "assignment_count":
+                        0,
+                }
+            )
+
+    clear_user_management_cache()
+
+    return results
+
+
 def reset_user_password(
     *,
     user_id: str,
