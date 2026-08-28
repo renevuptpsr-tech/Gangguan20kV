@@ -898,7 +898,7 @@ def _format_duration(
 # CREATE FORM STATE VERSION
 # ==========================================================
 
-_CREATE_FORM_STATE_VERSION = 6
+_CREATE_FORM_STATE_VERSION = 7
 
 
 def _migrate_create_form_state() -> None:
@@ -948,6 +948,12 @@ def _migrate_create_form_state() -> None:
         "input_event_type",
         None,
     )
+
+    # Mulai hierarchy widget dari revision baru setelah migrasi
+    # agar session lama tidak membawa pilihan dropdown terdahulu.
+    st.session_state[
+        "_input_event_hierarchy_revision"
+    ] = 0
 
     st.session_state[
         version_key
@@ -6903,10 +6909,19 @@ def _render_manuver_form(
 # ==========================================================
 
 
-def _clear_create_form_state() -> None:
+def _clear_create_form_state(
+    *,
+    next_event_type: str | None = None,
+) -> None:
     """
     Reset seluruh widget CREATE tanpa mengganggu session login,
     mode edit, atau state halaman lain.
+
+    Hierarchy selector memakai revision key agar Streamlit
+    membuat instance widget ULTG / GI / Bay / Penyulang yang
+    benar-benar baru setelah user memilih "Input Baru".
+    Dengan cara ini pilihan hierarchy sebelumnya tidak dapat
+    menempel kembali karena lifecycle widget Streamlit.
     """
 
     removable_prefixes = (
@@ -6934,9 +6949,85 @@ def _clear_create_form_state() -> None:
                 None,
             )
 
+    # Hapus state jenis operasi lama terlebih dahulu.
     st.session_state.pop(
         "input_event_type",
         None,
+    )
+
+    # Naikkan revision agar hierarchy selector dirender
+    # sebagai widget baru pada rerun berikutnya.
+    current_revision_raw = (
+        st.session_state.get(
+            "_input_event_hierarchy_revision",
+            0,
+        )
+    )
+
+    try:
+        current_revision = int(
+            current_revision_raw
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+        current_revision = 0
+
+    st.session_state[
+        "_input_event_hierarchy_revision"
+    ] = (
+        current_revision
+        + 1
+    )
+
+    # Saat membuat record baru dari dialog sukses,
+    # pertahankan jenis operasi yang baru saja disimpan.
+    # Untuk Gangguan -> tetap Gangguan.
+    # Untuk Manuver  -> tetap Manuver.
+    normalized_event_type = str(
+        next_event_type
+        or ""
+    ).strip().upper()
+
+    if normalized_event_type in {
+        "GANGGUAN",
+        "MANUVER",
+    }:
+        st.session_state[
+            "input_event_type"
+        ] = normalized_event_type
+
+
+def _get_create_hierarchy_key_prefix() -> str:
+    """
+    Prefix unik untuk hierarchy selector pada mode CREATE.
+
+    Revision berubah setiap kali form CREATE di-reset sehingga
+    ULTG / GI / Bay / Penyulang selalu kembali ke kondisi awal.
+    """
+
+    revision_raw = (
+        st.session_state.get(
+            "_input_event_hierarchy_revision",
+            0,
+        )
+    )
+
+    try:
+        revision = int(
+            revision_raw
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+        revision = 0
+
+    return (
+        f"input_event_{revision}"
     )
 
 
@@ -7036,14 +7127,23 @@ def _render_success_dialog(
     )
 
     with col_new:
+        new_input_label = (
+            "Input Gangguan Baru"
+            if event_type
+            == "GANGGUAN"
+            else "Input Manuver Baru"
+        )
+
         if st.button(
-            "Input Baru",
+            new_input_label,
             icon=":material/add_circle:",
             type="primary",
             use_container_width=True,
             key="success_input_new",
         ):
-            _clear_create_form_state()
+            _clear_create_form_state(
+                next_event_type=event_type,
+            )
 
             st.session_state.pop(
                 "input_success_dialog",
@@ -7617,10 +7717,14 @@ def render_page() -> None:
             "#### Identitas Penyulang"
         )
 
+        hierarchy_key_prefix = (
+            _get_create_hierarchy_key_prefix()
+        )
+
         selected = (
             render_hierarchy_selector(
                 key_prefix=(
-                    "input_event"
+                    hierarchy_key_prefix
                 )
             )
         )
