@@ -39,6 +39,10 @@ from services.supabase_client import (
 from services.profile_service import (
     get_my_profile,
 )
+from services.duplicate_event_service import (
+    clear_duplicate_event_cache,
+    get_active_gangguan_for_penyulang,
+)
 from services import telegram_service
 from services import drive_service
 
@@ -898,7 +902,7 @@ def _format_duration(
 # CREATE FORM STATE VERSION
 # ==========================================================
 
-_CREATE_FORM_STATE_VERSION = 7
+_CREATE_FORM_STATE_VERSION = 8
 
 
 def _migrate_create_form_state() -> None:
@@ -923,6 +927,7 @@ def _migrate_create_form_state() -> None:
         "create_gangguan_",
         "create_manuver_",
         "input_event_",
+        "duplicate_gangguan_confirm_",
     )
 
     for key in list(
@@ -5689,6 +5694,8 @@ def _render_gangguan_form(
                 ],
             )
 
+            clear_duplicate_event_cache()
+
             cause_name = (
                 cause_options.get(
                     str(
@@ -6928,6 +6935,7 @@ def _clear_create_form_state(
         "create_gangguan_",
         "create_manuver_",
         "input_event_",
+        "duplicate_gangguan_confirm_",
     )
 
     for key in list(
@@ -7254,6 +7262,249 @@ def _maybe_render_success_dialog() -> None:
         telegram_message=telegram_message,
         drive_ok=drive_ok,
         drive_message=drive_message,
+    )
+
+
+# ==========================================================
+# DUPLICATE GANGGUAN GUARD
+# ==========================================================
+
+
+def _format_event_datetime_short(
+    row: EventRow,
+) -> str:
+    event_date = (
+        _parse_date(
+            row.get(
+                "event_date"
+            )
+        )
+    )
+
+    event_time = (
+        _parse_time(
+            row.get(
+                "event_time"
+            )
+        )
+    )
+
+    date_text = (
+        event_date.strftime(
+            "%d-%m-%Y"
+        )
+        if event_date
+        else "-"
+    )
+
+    time_text = (
+        event_time.strftime(
+            "%H:%M"
+        )
+        if event_time
+        else "-"
+    )
+
+    return (
+        f"{date_text} {time_text}"
+    )
+
+
+def _render_duplicate_gangguan_guard(
+    *,
+    selected: HierarchySelection,
+) -> bool:
+    """
+    Warning bila penyulang masih memiliki Gangguan ONGOING.
+
+    True  = form Gangguan boleh dilanjutkan.
+    False = form ditahan sampai operator memberi konfirmasi.
+
+    Tidak dibuat hard-block karena kejadian baru pada penyulang
+    yang sama masih mungkin valid secara operasional.
+    """
+
+    penyulang_id = str(
+        selected.get(
+            "penyulang_id"
+        )
+        or ""
+    ).strip()
+
+    if not penyulang_id:
+        return True
+
+    try:
+        active_event = (
+            get_active_gangguan_for_penyulang(
+                penyulang_id
+            )
+        )
+
+    except Exception as exc:
+        st.warning(
+            "Pengecekan Gangguan aktif belum dapat dilakukan. "
+            "Pastikan kembali kondisi penyulang sebelum menyimpan."
+        )
+
+        with st.expander(
+            "Detail pengecekan",
+            expanded=False,
+        ):
+            st.caption(
+                str(
+                    exc
+                )
+            )
+
+        return True
+
+    if active_event is None:
+        return True
+
+    code = str(
+        active_event.get(
+            "penyulang_code"
+        )
+        or selected.get(
+            "penyulang_code"
+        )
+        or "-"
+    ).strip()
+
+    name = str(
+        active_event.get(
+            "penyulang_name"
+        )
+        or selected.get(
+            "penyulang_name"
+        )
+        or "-"
+    ).strip()
+
+    event_datetime = (
+        _format_event_datetime_short(
+            active_event
+        )
+    )
+
+    cause_name = str(
+        active_event.get(
+            "cause_name"
+        )
+        or active_event.get(
+            "cause_code"
+        )
+        or "-"
+    ).strip()
+
+    supply_name = str(
+        active_event.get(
+            "supply_status_name"
+        )
+        or active_event.get(
+            "supply_status_code"
+        )
+        or "Belum diketahui"
+    ).strip()
+
+    operator_name = str(
+        active_event.get(
+            "operator_name"
+        )
+        or "-"
+    ).strip()
+
+    event_id = str(
+        active_event.get(
+            "event_id"
+        )
+        or ""
+    ).strip()
+
+    with st.container(
+        border=True
+    ):
+        st.warning(
+            "Penyulang ini masih memiliki Gangguan Aktif."
+        )
+
+        st.markdown(
+            f"**{code} — {name}** masih memiliki record "
+            f"berstatus **ONGOING**."
+        )
+
+        col_time, col_cause, col_supply = (
+            st.columns(
+                [1, 1.2, 1.2]
+            )
+        )
+
+        with col_time:
+            st.caption(
+                "Mulai Gangguan"
+            )
+
+            st.write(
+                f"**{event_datetime}**"
+            )
+
+        with col_cause:
+            st.caption(
+                "Klasifikasi"
+            )
+
+            st.write(
+                f"**{cause_name}**"
+            )
+
+        with col_supply:
+            st.caption(
+                "Status Suplai"
+            )
+
+            st.write(
+                f"**{supply_name}**"
+            )
+
+        st.caption(
+            f"Operator: {operator_name}"
+            + (
+                f" · Event ID: {event_id}"
+                if event_id
+                else ""
+            )
+        )
+
+        confirm_key = (
+            "duplicate_gangguan_confirm_"
+            f"{penyulang_id}_"
+            f"{event_id or 'active'}"
+        )
+
+        confirmed = (
+            st.checkbox(
+                "Ini merupakan kejadian Gangguan baru yang berbeda. "
+                "Tetap lanjutkan input.",
+                key=(
+                    confirm_key
+                ),
+                help=(
+                    "Centang hanya jika kejadian yang akan dicatat "
+                    "memang merupakan Gangguan baru, bukan kelanjutan "
+                    "dari record yang masih aktif."
+                ),
+            )
+        )
+
+        if not confirmed:
+            st.caption(
+                "Jika ini adalah kelanjutan gangguan yang sama, "
+                "lengkapi pemulihan melalui menu Gangguan Aktif."
+            )
+
+    return bool(
+        confirmed
     )
 
 
@@ -7821,6 +8072,15 @@ def render_page() -> None:
         operation_type
         == "GANGGUAN"
     ):
+        duplicate_allowed = (
+            _render_duplicate_gangguan_guard(
+                selected=selected
+            )
+        )
+
+        if not duplicate_allowed:
+            return
+
         _render_gangguan_form(
             mode="CREATE",
             selected=(
