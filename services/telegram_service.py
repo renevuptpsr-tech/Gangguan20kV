@@ -10,7 +10,7 @@ from services.supabase_client import (
 )
 
 
-TELEGRAM_TEMPLATE_VERSION = "2026.08.28-v8-gi-attention-mention"
+TELEGRAM_TEMPLATE_VERSION = "2026.08.31-v9-inline-recovery"
 
 
 # ==========================================================
@@ -149,6 +149,30 @@ def _format_number(
     )
 
 
+def has_pmt_recovery(
+    payload: dict[str, Any],
+) -> bool:
+    """
+    True hanya jika operasi PMT benar-benar sudah dilakukan.
+
+    Status suplai beban tidak dipakai sebagai trigger notifikasi
+    pemulihan. Dengan demikian FEEDER_ASAL/MANUVER sementara
+    PMT masih BELUM tidak menghasilkan pesan recovery.
+    """
+
+    recovery_status = str(
+        payload.get(
+            "recovery_status_code"
+        )
+        or ""
+    ).strip().upper()
+
+    return recovery_status in {
+        "MASUK",
+        "MASUK_TRIP",
+    }
+
+
 # ==========================================================
 # GI TELEGRAM MENTION
 # ==========================================================
@@ -158,21 +182,7 @@ def _load_gi_telegram_mentions(
     hierarchy: dict[str, Any],
 ) -> list[dict[str, str]]:
     """
-    Mengambil contact Telegram resmi GI dari:
-
-    mst_unit_channel
-        channel_type = TELEGRAM
-
-    yang dipetakan ke GI melalui:
-
-    map_functloc_channel
-
-    Satu contact dapat dipakai oleh lebih dari satu GI.
-    Contoh:
-        GI 150 kV SIMANGKOK
-        GITET 275 kV SIMANGKOK
-
-    external_id dipakai sebagai Telegram user_id untuk mention.
+    Mengambil contact Telegram resmi GI dari RPC.
     """
 
     gi_flc = str(
@@ -191,9 +201,6 @@ def _load_gi_telegram_mentions(
     try:
         supabase = get_supabase_client()
 
-        # Lookup melalui SECURITY DEFINER RPC.
-        # Client Streamlit memakai role authenticated sehingga tidak perlu
-        # SELECT langsung ke tabel master channel yang memang tidak diekspos.
         channel_response = (
             supabase
             .rpc(
@@ -233,15 +240,20 @@ def _load_gi_telegram_mentions(
 
             result.append(
                 {
-                    "external_id": external_id,
-                    "channel_value": channel_value,
-                    "is_primary": str(
-                        bool(
-                            row.get(
-                                "is_primary"
+                    "external_id":
+                        external_id,
+
+                    "channel_value":
+                        channel_value,
+
+                    "is_primary":
+                        str(
+                            bool(
+                                row.get(
+                                    "is_primary"
+                                )
                             )
-                        )
-                    ),
+                        ),
                 }
             )
 
@@ -261,8 +273,6 @@ def _load_gi_telegram_mentions(
         return result
 
     except Exception:
-        # Mention adalah informasi tambahan.
-        # Kegagalan lookup tidak boleh menggagalkan notifikasi utama.
         return []
 
 
@@ -271,21 +281,6 @@ def _build_gi_mention_lines(
     *,
     context: str = "GANGGUAN",
 ) -> list[str]:
-    """
-    Membuat mention Telegram untuk CONTACT RESMI GI.
-
-    Tujuannya bukan menampilkan label/tag administratif, tetapi membuat
-    awareness agar contact GI terkait mengetahui bahwa pesan bot tersebut
-    ditujukan kepada GI-nya.
-
-    Prioritas mention:
-    1. Jika channel_value adalah @username -> native @mention.
-    2. Jika tidak ada username -> inline mention menggunakan Telegram user_id
-       yang disimpan pada external_id melalui tg://user?id=<id>.
-
-    Contact berasal dari mapping functloc GI, bukan operator personal.
-    """
-
     contacts = _load_gi_telegram_mentions(
         hierarchy
     )
@@ -321,7 +316,9 @@ def _build_gi_mention_lines(
 
         if channel_value.startswith("@"):
             mention_items.append(
-                _escape_html(channel_value)
+                _escape_html(
+                    channel_value
+                )
             )
             continue
 
@@ -344,19 +341,19 @@ def _build_gi_mention_lines(
             )
             continue
 
-        # Seharusnya tidak terjadi karena RPC hanya mengembalikan external_id
-        # yang terisi. Fallback ini mencegah notifikasi utama gagal.
         mention_items.append(
-            _escape_html(channel_value)
+            _escape_html(
+                channel_value
+            )
         )
 
-    # Mention berfungsi seperti CC pada email: hanya memberi awareness
-    # kepada contact resmi GI terkait, tanpa kalimat perintah tambahan.
     return [
         "",
         (
             "📌 <b>CC:</b> "
-            + " | ".join(mention_items)
+            + " | ".join(
+                mention_items
+            )
         ),
     ]
 
@@ -394,13 +391,6 @@ def _three_phase_current_values(
     float | None,
     float | None,
 ]:
-    """
-    Membaca arus R/S/T.
-
-    Jika payload lama belum membawa field phasa, fallback ke
-    nilai legacy single-current agar notifikasi lama tetap aman.
-    """
-
     current_r = _optional_float(
         payload.get(
             f"{prefix}_r_a"
@@ -450,13 +440,6 @@ def _format_three_phase_current(
     prefix: str,
     legacy_field: str,
 ) -> str:
-    """
-    Format singkat arus R/S/T untuk Telegram.
-
-    Contoh:
-        R 102,00 A | S 98,00 A | T 100,00 A
-    """
-
     current_r, current_s, current_t = (
         _three_phase_current_values(
             payload,
@@ -472,18 +455,12 @@ def _format_three_phase_current(
     )
 
 
-
-
 def _has_three_phase_or_legacy_current(
     payload: dict[str, Any],
     *,
     prefix: str,
     legacy_field: str,
 ) -> bool:
-    """
-    True bila minimal ada satu nilai arus R/S/T atau legacy.
-    """
-
     return any(
         payload.get(
             field
@@ -503,14 +480,6 @@ def _build_maneuver_current_lines(
     *,
     bullet: str = "• ",
 ) -> list[str]:
-    """
-    Menyusun informasi beban termanuver dan sisa beban.
-
-    - MANUVER_PENUH: tampilkan beban termanuver R/S/T.
-    - MANUVER_SEBAGIAN: tampilkan termanuver + sisa R/S/T.
-    - Data lama fallback ke field legacy single-current.
-    """
-
     supply_status = str(
         payload.get(
             "supply_status_code"
@@ -568,19 +537,6 @@ def _build_maneuver_current_lines(
 def _enrich_hierarchy_with_area(
     hierarchy: dict[str, Any],
 ) -> dict[str, Any]:
-    """
-    Menambahkan data wilayah penyulang dari
-    vw_penyulang_hierarchy_accessible.
-
-    Field:
-    - wilayah_penyaluran
-    - up3_code
-    - ulp_code
-
-    Query hanya dilakukan apabila field belum tersedia
-    pada hierarchy yang dikirim dari selector.
-    """
-
     result = dict(
         hierarchy
     )
@@ -663,16 +619,11 @@ def _enrich_hierarchy_with_area(
 
             result[
                 field_name
-            ] = (
-                area_row.get(
-                    field_name
-                )
+            ] = area_row.get(
+                field_name
             )
 
     except Exception:
-        # Informasi wilayah bersifat tambahan.
-        # Kegagalan query wilayah tidak boleh membatalkan
-        # notifikasi utama Telegram.
         return result
 
     return result
@@ -736,15 +687,6 @@ OGF_INDICATION_CODES: set[str] = {
 def _date_ranges(
     event_date_value: Any,
 ) -> tuple[str, str, str] | None:
-    """
-    Menghasilkan:
-    - tanggal kejadian
-    - awal bulan
-    - awal bulan berikutnya
-
-    Format ISO YYYY-MM-DD.
-    """
-
     from datetime import date as date_type
 
     text = str(
@@ -793,21 +735,6 @@ def _date_ranges(
 def _classify_disturbance(
     indication_codes: set[str],
 ) -> str:
-    """
-    Klasifikasi eksklusif untuk monitoring frekuensi:
-
-    OGF
-        Jika event mempunyai minimal satu indikasi:
-        OCR INST / OCR TD / GFR INST / GFR TD.
-
-    SYSTEM
-        Gangguan lainnya, termasuk UFR/UVLS, OLS, RTN,
-        atau gangguan tanpa indikasi OCR/GFR.
-
-    Jika satu event memiliki OCR/GFR sekaligus UFR/OLS,
-    event dihitung sebagai OGF agar satu event tidak dihitung ganda.
-    """
-
     normalized = {
         str(
             code
@@ -831,19 +758,6 @@ def _load_disturbance_frequency(
     penyulang_id: str,
     event_date_value: Any,
 ) -> dict[str, int]:
-    """
-    Menghitung frekuensi Gangguan pada PENYULANG YANG SAMA.
-
-    Harian:
-        seluruh event GANGGUAN pada tanggal kejadian.
-
-    Bulanan:
-        seluruh event GANGGUAN sejak tanggal 1 sampai
-        sebelum tanggal 1 bulan berikutnya.
-
-    Deleted event tidak dihitung.
-    """
-
     result = {
         "daily_total": 0,
         "daily_ogf": 0,
@@ -1039,8 +953,6 @@ def _load_disturbance_frequency(
                     ] += 1
 
     except Exception:
-        # Statistik bersifat tambahan.
-        # Kegagalan query tidak boleh menggagalkan notifikasi Telegram.
         return result
 
     return result
@@ -1333,6 +1245,104 @@ def send_telegram_attachments(
 
 
 # ==========================================================
+# INLINE RECOVERY
+# ==========================================================
+
+
+def _build_inline_recovery_lines(
+    *,
+    recovery_payload: dict[str, Any],
+    event_type: str,
+) -> list[str]:
+    """
+    Section recovery yang ditempel pada pesan event awal.
+
+    Dipakai ketika gangguan + operasi PMT dimasukkan pada submit
+    yang sama sehingga Telegram hanya menerima satu text message.
+    """
+
+    if not has_pmt_recovery(
+        recovery_payload
+    ):
+        return []
+
+    is_manuver = (
+        str(
+            event_type
+            or ""
+        ).strip().upper()
+        == "MANUVER"
+    )
+
+    lines: list[str] = [
+        "",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "",
+        "✅ <b>PEMULIHAN / NORMALISASI</b>",
+        "",
+        (
+            "🔋 <b>Status Suplai:</b> "
+            f"{_escape_html(recovery_payload.get('supply_status_code') or '-')}"
+        ),
+    ]
+
+    lines.extend(
+        _build_maneuver_current_lines(
+            recovery_payload,
+            bullet="• ",
+        )
+    )
+
+    lines.extend(
+        [
+            (
+                "⚙️ <b>Status PMT:</b> "
+                f"{_escape_html(recovery_payload.get('recovery_status_code') or '-')}"
+            ),
+            (
+                "🗓️ <b>Waktu Operasi PMT:</b> "
+                f"{_escape_html(recovery_payload.get('recovery_date') or '-')} "
+                f"{_escape_html(recovery_payload.get('recovery_time') or '-')}"
+            ),
+            (
+                "📈 <b>Arus Setelah:</b> "
+                + _format_three_phase_current(
+                    recovery_payload,
+                    prefix="load_current_after",
+                    legacy_field="load_current_after_a",
+                )
+            ),
+            (
+                "⚡ <b>Tegangan Setelah:</b> "
+                f"{_format_number(recovery_payload.get('voltage_after_kv'), 'kV')}"
+            ),
+            (
+                "🔢 <b>Counter PMT:</b> "
+                f"{_escape_html(
+                    recovery_payload.get('pmt_counter_after')
+                    if recovery_payload.get('pmt_counter_after') is not None
+                    else '-'
+                )}"
+            ),
+            "",
+            (
+                "📝 <b>Keterangan Normalisasi:</b>"
+                if is_manuver
+                else "📝 <b>Keterangan Pemulihan / Normalisasi:</b>"
+            ),
+            _escape_html(
+                recovery_payload.get(
+                    "recovery_description"
+                )
+                or "-"
+            ),
+        ]
+    )
+
+    return lines
+
+
+# ==========================================================
 # EVENT MESSAGE
 # ==========================================================
 
@@ -1348,6 +1358,7 @@ def build_event_message(
     annunciator_name: str | None = None,
     indication_names: list[str] | None = None,
     disturbance_frequency: dict[str, int] | None = None,
+    recovery_payload: dict[str, Any] | None = None,
 ) -> str:
     is_gangguan = (
         str(
@@ -1397,50 +1408,50 @@ def build_event_message(
 
     lines.extend(
         [
-        "",
-        "👥 <b>Petugas Operasi</b>",
-        (
-            "• Operator: "
-            f"{_escape_html(payload.get('operator_name') or '-')}"
-        ),
-        (
-            "• Dispatcher UP2D: "
-            f"{_escape_html(payload.get('dispatcher_up2d_name') or '-')}"
-        ),
-        (
-            "• Diinput Oleh: "
-            f"{_escape_html(payload.get('created_by_name') or payload.get('input_user_name') or '-')}"
-        ),
-        "",
-        (
-            "🗓️ <b>Waktu:</b> "
-            f"{_escape_html(payload.get('event_date') or '-')} "
-            f"{_escape_html(payload.get('event_time') or '-')}"
-        ),
-        (
-            "⚙️ <b>Status PMT:</b> "
-            f"{_escape_html(payload.get('pmt_status_code') or '-')}"
-        ),
-        (
-            "👤 <b>PIC:</b> "
-            f"{_escape_html(pic_name or payload.get('pic_code') or '-')}"
-        ),
-        (
-            "📝 <b>Klasifikasi:</b> "
-            f"{_escape_html(cause_name or payload.get('cause_code') or '-')}"
-        ),
-        (
-            "📈 <b>Arus Beban Sebelum:</b> "
-            + _format_three_phase_current(
-                payload,
-                prefix="load_current_before",
-                legacy_field="load_current_before_a",
-            )
-        ),
-        (
-            "⚡ <b>Tegangan:</b> "
-            f"{_format_number(payload.get('voltage_before_kv'), 'kV')}"
-        ),
+            "",
+            "👥 <b>Petugas Operasi</b>",
+            (
+                "• Operator: "
+                f"{_escape_html(payload.get('operator_name') or '-')}"
+            ),
+            (
+                "• Dispatcher UP2D: "
+                f"{_escape_html(payload.get('dispatcher_up2d_name') or '-')}"
+            ),
+            (
+                "• Diinput Oleh: "
+                f"{_escape_html(payload.get('created_by_name') or payload.get('input_user_name') or '-')}"
+            ),
+            "",
+            (
+                "🗓️ <b>Waktu:</b> "
+                f"{_escape_html(payload.get('event_date') or '-')} "
+                f"{_escape_html(payload.get('event_time') or '-')}"
+            ),
+            (
+                "⚙️ <b>Status PMT:</b> "
+                f"{_escape_html(payload.get('pmt_status_code') or '-')}"
+            ),
+            (
+                "👤 <b>PIC:</b> "
+                f"{_escape_html(pic_name or payload.get('pic_code') or '-')}"
+            ),
+            (
+                "📝 <b>Klasifikasi:</b> "
+                f"{_escape_html(cause_name or payload.get('cause_code') or '-')}"
+            ),
+            (
+                "📈 <b>Arus Beban Sebelum:</b> "
+                + _format_three_phase_current(
+                    payload,
+                    prefix="load_current_before",
+                    legacy_field="load_current_before_a",
+                )
+            ),
+            (
+                "⚡ <b>Tegangan:</b> "
+                f"{_format_number(payload.get('voltage_before_kv'), 'kV')}"
+            ),
         ]
     )
 
@@ -1511,11 +1522,6 @@ def build_event_message(
             ]
         )
 
-        # Pemulihan/normalisasi sengaja TIDAK ditempel pada pesan awal
-        # gangguan. Aplikasi mengirim notifikasi pemulihan melalui
-        # send_recovery_notification(), sehingga satu kejadian tidak
-        # menghasilkan dua blok pemulihan yang sama.
-
     if not is_gangguan:
         maneuver_lines = (
             _build_maneuver_current_lines(
@@ -1575,6 +1581,23 @@ def build_event_message(
             ]
         )
 
+    if (
+        recovery_payload is not None
+        and has_pmt_recovery(
+            recovery_payload
+        )
+    ):
+        lines.extend(
+            _build_inline_recovery_lines(
+                recovery_payload=(
+                    recovery_payload
+                ),
+                event_type=(
+                    event_type
+                ),
+            )
+        )
+
     lines.extend(
         [
             "",
@@ -1601,6 +1624,7 @@ def send_event_notification(
     annunciator_name: str | None = None,
     indication_names: list[str] | None = None,
     uploaded_files: list[Any] | None = None,
+    recovery_payload: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     try:
         enriched_hierarchy = (
@@ -1661,6 +1685,9 @@ def send_event_notification(
                 ),
                 disturbance_frequency=(
                     disturbance_frequency
+                ),
+                recovery_payload=(
+                    recovery_payload
                 ),
             )
         )
@@ -1799,6 +1826,11 @@ def build_recovery_message(
                 f"{_escape_html(recovery_payload.get('recovery_status_code') or '-')}"
             ),
             (
+                "🗓️ <b>Waktu Operasi PMT:</b> "
+                f"{_escape_html(recovery_payload.get('recovery_date') or '-')} "
+                f"{_escape_html(recovery_payload.get('recovery_time') or '-')}"
+            ),
+            (
                 "📈 <b>Arus Setelah:</b> "
                 + _format_three_phase_current(
                     recovery_payload,
@@ -1812,7 +1844,11 @@ def build_recovery_message(
             ),
             (
                 "🔢 <b>Counter PMT:</b> "
-                f"{_escape_html(recovery_payload.get('pmt_counter_after') if recovery_payload.get('pmt_counter_after') is not None else '-')}"
+                f"{_escape_html(
+                    recovery_payload.get('pmt_counter_after')
+                    if recovery_payload.get('pmt_counter_after') is not None
+                    else '-'
+                )}"
             ),
             "",
             (
@@ -1854,6 +1890,26 @@ def send_recovery_notification(
     recovery_payload: dict[str, Any],
     uploaded_files: list[Any] | None = None,
 ) -> tuple[bool, str]:
+    """
+    Digunakan bila pemulihan dilakukan BELAKANGAN dari halaman
+    Gangguan Aktif.
+
+    Tidak digunakan pada CREATE Gangguan yang sudah sekaligus
+    memiliki operasi PMT; skenario tersebut memakai inline recovery
+    pada send_event_notification().
+    """
+
+    if not has_pmt_recovery(
+        recovery_payload
+    ):
+        return (
+            True,
+            (
+                "Pemulihan PMT belum tercatat; "
+                "notifikasi pemulihan tidak dikirim."
+            ),
+        )
+
     try:
         enriched_event_row = (
             _enrich_hierarchy_with_area(

@@ -5722,14 +5722,53 @@ def _render_gangguan_form(
                 )
             )
 
+            # ==================================================
+            # TELEGRAM
+            # ==================================================
+            #
+            # Ambil identitas pembuat dari record yang sudah
+            # tersimpan agar "Diinput Oleh" mengikuti created_by
+            # transaksi yang benar.
+            # ==================================================
+
+            latest_event_row = (
+                get_event_by_id(
+                    event_id
+                )
+                or saved_event
+            )
+
+            created_by_name = str(
+                latest_event_row.get(
+                    "created_by_name"
+                )
+                or ""
+            ).strip()
+
+            if not created_by_name:
+                created_by_name = (
+                    _current_input_user_name()
+                )
+
             telegram_payload = dict(
                 payload
             )
 
             telegram_payload[
                 "created_by_name"
-            ] = _current_input_user_name()
+            ] = created_by_name
 
+            # Recovery hanya dianggap ada apabila PMT benar-benar
+            # MASUK atau MASUK_TRIP. Pemulihan suplai/manuver saja
+            # dengan PMT BELUM tidak memicu Telegram Pemulihan.
+            has_direct_recovery = (
+                telegram_service.has_pmt_recovery(
+                    payload
+                )
+            )
+
+            # Jika recovery diisi pada submit CREATE yang sama,
+            # Gangguan + Pemulihan dikirim menjadi SATU bubble.
             telegram_ok, telegram_message = (
                 telegram_service.send_event_notification(
                     event_id=event_id,
@@ -5763,77 +5802,13 @@ def _render_gangguan_form(
                         evidence
                         or []
                     ),
+                    recovery_payload=(
+                        payload
+                        if has_direct_recovery
+                        else None
+                    ),
                 )
             )
-
-            # Jika data pemulihan sudah diisi langsung saat
-            # input Gangguan, kirim notifikasi Pemulihan
-            # sebagai pesan Telegram kedua. User tidak perlu
-            # masuk dahulu ke halaman Gangguan Aktif.
-            recovery_status_code = str(
-                payload.get(
-                    "recovery_status_code"
-                )
-                or ""
-            ).strip().upper()
-
-            supply_status_code = str(
-                payload.get(
-                    "supply_status_code"
-                )
-                or "BELUM"
-            ).strip().upper()
-
-            has_direct_recovery = (
-                recovery_status_code
-                not in {
-                    "",
-                    "BELUM",
-                }
-                or supply_status_code
-                not in {
-                    "",
-                    "BELUM",
-                }
-                or bool(
-                    payload.get(
-                        "final_supply_normalized"
-                    )
-                )
-            )
-
-            if has_direct_recovery:
-                latest_event_row = (
-                    get_event_by_id(
-                        event_id
-                    )
-                    or saved_event
-                )
-
-                (
-                    recovery_telegram_ok,
-                    recovery_telegram_message,
-                ) = (
-                    telegram_service.send_recovery_notification(
-                        event_id=event_id,
-                        event_row=latest_event_row,
-                        recovery_payload=payload,
-                        uploaded_files=list(
-                            evidence
-                            or []
-                        ),
-                    )
-                )
-
-                telegram_ok = (
-                    telegram_ok
-                    and recovery_telegram_ok
-                )
-
-                telegram_message = (
-                    f"{telegram_message} | "
-                    f"{recovery_telegram_message}"
-                )
 
         drive_ok = (
             not drive_errors
@@ -6822,13 +6797,32 @@ def _render_manuver_form(
                 )
             )
 
+            latest_event_row = (
+                get_event_by_id(
+                    event_id
+                )
+                or saved_event
+            )
+
+            created_by_name = str(
+                latest_event_row.get(
+                    "created_by_name"
+                )
+                or ""
+            ).strip()
+
+            if not created_by_name:
+                created_by_name = (
+                    _current_input_user_name()
+                )
+
             telegram_payload = dict(
                 payload
             )
 
             telegram_payload[
                 "created_by_name"
-            ] = _current_input_user_name()
+            ] = created_by_name
 
             telegram_ok, telegram_message = (
                 telegram_service.send_event_notification(

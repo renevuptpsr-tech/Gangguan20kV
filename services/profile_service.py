@@ -5,7 +5,10 @@ from typing import Any, cast
 
 import streamlit as st
 
-from services.supabase_client import get_supabase_client
+from services.supabase_client import (
+    SESSION_USER_KEY,
+    get_supabase_client,
+)
 
 
 ProfileRow = dict[str, Any]
@@ -97,14 +100,6 @@ def _normalize_function_response(
 def _as_dict_list(
     data: Any,
 ) -> list[dict[str, Any]]:
-    """
-    Menormalkan response Supabase menjadi list[dict].
-
-    Supabase response.data memiliki union type yang cukup luas
-    pada type stub, sehingga helper ini juga menghilangkan
-    warning Pylance saat melakukan indexing.
-    """
-
     if not isinstance(
         data,
         list,
@@ -128,11 +123,44 @@ def _as_dict_list(
     return result
 
 
+def _get_current_user_id() -> str:
+    """
+    UUID user login digunakan sebagai bagian dari cache key.
+
+    st.cache_data bersifat shared lintas session/browser,
+    sehingga cache profile/assignment tidak boleh menggunakan
+    cache key kosong.
+    """
+
+    user = st.session_state.get(
+        SESSION_USER_KEY
+    )
+
+    if user is None:
+        return ""
+
+    user_id = getattr(
+        user,
+        "id",
+        None,
+    )
+
+    return str(
+        user_id
+        or ""
+    ).strip()
+
+
 @st.cache_data(
     ttl=60,
     show_spinner=False,
 )
-def _load_my_profile() -> ProfileRow:
+def _load_my_profile(
+    user_id: str,
+) -> ProfileRow:
+    if not user_id:
+        return {}
+
     supabase = get_supabase_client()
 
     response = (
@@ -157,14 +185,26 @@ def _load_my_profile() -> ProfileRow:
 
 
 def get_my_profile() -> ProfileRow:
-    return _load_my_profile()
+    user_id = _get_current_user_id()
+
+    if not user_id:
+        return {}
+
+    return _load_my_profile(
+        user_id
+    )
 
 
 @st.cache_data(
     ttl=60,
     show_spinner=False,
 )
-def _load_my_assignments() -> list[AssignmentRow]:
+def _load_my_assignments(
+    user_id: str,
+) -> list[AssignmentRow]:
+    if not user_id:
+        return []
+
     supabase = get_supabase_client()
 
     response = (
@@ -186,14 +226,26 @@ def _load_my_assignments() -> list[AssignmentRow]:
 
 
 def get_my_assignments() -> list[AssignmentRow]:
-    return _load_my_assignments()
+    user_id = _get_current_user_id()
+
+    if not user_id:
+        return []
+
+    return _load_my_assignments(
+        user_id
+    )
 
 
 @st.cache_data(
     ttl=60,
     show_spinner=False,
 )
-def _load_my_unit_users() -> list[UnitUserRow]:
+def _load_my_unit_users(
+    user_id: str,
+) -> list[UnitUserRow]:
+    if not user_id:
+        return []
+
     supabase = get_supabase_client()
 
     response = (
@@ -215,10 +267,27 @@ def _load_my_unit_users() -> list[UnitUserRow]:
 
 
 def get_my_unit_users() -> list[UnitUserRow]:
-    return _load_my_unit_users()
+    user_id = _get_current_user_id()
+
+    if not user_id:
+        return []
+
+    return _load_my_unit_users(
+        user_id
+    )
 
 
 def clear_profile_cache() -> None:
+    """
+    Bersihkan cache profile/access-derived data.
+
+    Dipanggil setelah:
+    - login;
+    - logout;
+    - perubahan role;
+    - perubahan assignment.
+    """
+
     _load_my_profile.clear()
     _load_my_assignments.clear()
     _load_my_unit_users.clear()
