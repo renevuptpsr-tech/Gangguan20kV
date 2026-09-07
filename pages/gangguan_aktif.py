@@ -25,7 +25,8 @@ def _load_active_gangguan(
     user_id: str,
 ) -> list[GangguanRow]:
     """
-    Membaca seluruh gangguan penyulang
+    Membaca seluruh kejadian penyulang
+    (GANGGUAN dan MANUVER)
     yang masih berstatus ONGOING.
     """
 
@@ -35,9 +36,12 @@ def _load_active_gangguan(
         supabase
         .table("vw_kejadian_penyulang_detail")
         .select("*")
-        .eq(
+        .in_(
             "event_type_code",
-            "GANGGUAN",
+            [
+                "GANGGUAN",
+                "MANUVER",
+            ],
         )
         .eq(
             "record_status",
@@ -948,7 +952,7 @@ def _render_summary_metrics(
 
     with col_1:
         st.metric(
-            "Gangguan Aktif",
+            "Kejadian Aktif",
             total_active,
         )
 
@@ -1606,6 +1610,25 @@ def _render_gangguan_card(
         or "-"
     )
 
+    event_type_code = str(
+        row.get(
+            "event_type_code"
+        )
+        or "GANGGUAN"
+    ).strip().upper()
+
+    event_type_name = (
+        "Manuver"
+        if event_type_code == "MANUVER"
+        else "Gangguan"
+    )
+
+    event_time_label = (
+        "Lepas PMT"
+        if event_type_code == "MANUVER"
+        else "Trip PMT"
+    )
+
     live_metrics = (
         _calculate_live_metrics(
             row
@@ -1672,7 +1695,7 @@ def _render_gangguan_card(
 
         with col_trip:
             st.metric(
-                "Trip PMT",
+                event_time_label,
                 (
                     f"{event_date} "
                     f"{event_time}"
@@ -1905,7 +1928,7 @@ def _render_gangguan_card(
 
         with col_operation:
             st.markdown(
-                "**Gangguan**"
+                f"**{event_type_name}**"
             )
 
             st.write(
@@ -1937,7 +1960,11 @@ def _render_gangguan_card(
         # ==================================================
 
         with st.expander(
-            "Detail Teknis Gangguan"
+            (
+                "Detail Teknis Manuver"
+                if event_type_code == "MANUVER"
+                else "Detail Teknis Gangguan"
+            )
         ):
             _render_technical_detail(
                 row
@@ -1976,7 +2003,7 @@ def render_page() -> None:
     )
 
     st.caption(
-        "Monitoring gangguan penyulang yang masih "
+        "Monitoring gangguan dan manuver penyulang yang masih "
         "memerlukan pemulihan beban atau normalisasi PMT."
     )
 
@@ -2035,7 +2062,7 @@ def render_page() -> None:
 
     if not rows:
         st.success(
-            "Tidak terdapat gangguan penyulang "
+            "Tidak terdapat gangguan atau manuver penyulang "
             "yang masih aktif."
         )
 
@@ -2055,7 +2082,7 @@ def render_page() -> None:
 
     if not filtered_rows:
         st.info(
-            "Tidak ada gangguan aktif "
+            "Tidak ada gangguan atau manuver aktif "
             "yang sesuai dengan filter."
         )
 
@@ -2064,7 +2091,7 @@ def render_page() -> None:
     st.caption(
         f"Menampilkan "
         f"{len(filtered_rows)} dari "
-        f"{len(rows)} gangguan aktif."
+        f"{len(rows)} kejadian aktif."
     )
 
     # ======================================================
