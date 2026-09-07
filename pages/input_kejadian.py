@@ -1757,9 +1757,11 @@ def _clear_edit_mode() -> None:
 
     removable_prefixes = (
         "update_gangguan_",
+        "update_manuver_",
         "history_gangguan_",
         "history_manuver_",
         "prepared_update_gangguan_",
+        "prepared_update_manuver_",
         "prepared_history_gangguan_",
         "prepared_history_manuver_",
     )
@@ -5882,15 +5884,33 @@ def _render_manuver_form(
     selected: HierarchySelection | None,
     existing_row: EventRow | None,
 ) -> None:
+    is_active_update = (
+        mode
+        == "UPDATE"
+    )
+
     is_history_update = (
         mode
         == "UPDATE_HISTORY"
     )
 
-    prefix = (
-        "history_manuver"
-        if is_history_update
-        else "create_manuver"
+    if is_active_update:
+        prefix = (
+            "update_manuver"
+        )
+
+    elif is_history_update:
+        prefix = (
+            "history_manuver"
+        )
+
+    else:
+        prefix = (
+            "create_manuver"
+        )
+
+    initial_disabled = (
+        is_active_update
     )
 
     with st.container(
@@ -5900,7 +5920,13 @@ def _render_manuver_form(
             "#### Data Operasi Manuver"
         )
 
-        if is_history_update:
+        if is_active_update:
+            st.caption(
+                "Data manuver awal dikunci. "
+                "Mode ini hanya untuk Pemulihan & Normalisasi."
+            )
+
+        elif is_history_update:
             st.caption(
                 "Mode Edit Riwayat Manuver."
             )
@@ -5921,6 +5947,9 @@ def _render_manuver_form(
                     key=(
                         f"{prefix}_date"
                     ),
+                    disabled=(
+                        initial_disabled
+                    ),
                 )
             )
 
@@ -5930,6 +5959,9 @@ def _render_manuver_form(
                     "Waktu PMT Lepas",
                     key=(
                         f"{prefix}_time"
+                    ),
+                    disabled=(
+                        initial_disabled
                     ),
                 )
             )
@@ -5953,7 +5985,7 @@ def _render_manuver_form(
         ) = _render_three_phase_current_input(
             title="Arus Beban Sebelum Manuver",
             key_prefix=f"{prefix}_load_current_before",
-            disabled=False,
+            disabled=initial_disabled,
             help_text=(
                 "Masukkan arus beban masing-masing phasa "
                 "sebelum manuver."
@@ -5977,6 +6009,7 @@ def _render_manuver_form(
                 _numeric_text_input_optional(
                     "Tegangan Sistem (kV)",
                     key=f"{prefix}_voltage_before",
+                    disabled=initial_disabled,
                     placeholder="Masukkan tegangan",
                 )
             )
@@ -5998,7 +6031,7 @@ def _render_manuver_form(
         _render_operation_staff(
             prefix=prefix,
             existing_row=existing_row,
-            disabled=False,
+            disabled=initial_disabled,
         )
     )
 
@@ -6051,7 +6084,10 @@ def _render_manuver_form(
     )
 
     if (
-        is_history_update
+        (
+            is_active_update
+            or is_history_update
+        )
         and existing_row is not None
     ):
         existing_pic = str(
@@ -6116,6 +6152,9 @@ def _render_manuver_form(
                     key=(
                         f"{prefix}_pic"
                     ),
+                    disabled=(
+                        initial_disabled
+                    ),
                 )
             )
 
@@ -6147,7 +6186,10 @@ def _render_manuver_form(
         ]
 
         if (
-            is_history_update
+            (
+                is_active_update
+                or is_history_update
+            )
             and existing_row is not None
         ):
             existing_cause = str(
@@ -6202,7 +6244,8 @@ def _render_manuver_form(
                         f"{prefix}_cause"
                     ),
                     disabled=(
-                        not bool(
+                        initial_disabled
+                        or not bool(
                             selected_pic
                         )
                     ),
@@ -6219,6 +6262,9 @@ def _render_manuver_form(
                 height=110,
                 key=(
                     f"{prefix}_description"
+                ),
+                disabled=(
+                    initial_disabled
                 ),
             )
         )
@@ -6383,6 +6429,358 @@ def _render_manuver_form(
         )
 
         return errors
+
+
+    # ======================================================
+    # ACTIVE UPDATE MANUVER
+    # ======================================================
+
+    if is_active_update:
+        st.divider()
+
+        col_back, col_save = (
+            st.columns(
+                [1, 2]
+            )
+        )
+
+        with col_back:
+            back_clicked = (
+                st.button(
+                    "Kembali",
+                    use_container_width=True,
+                    key=(
+                        "update_manuver_back_to_active"
+                    ),
+                )
+            )
+
+        if back_clicked:
+            _return_to_source()
+            return
+
+        with col_save:
+            save_clicked = (
+                st.button(
+                    "Simpan Pemulihan & Normalisasi",
+                    type="primary",
+                    use_container_width=True,
+                    key=(
+                        "update_manuver_save_recovery"
+                    ),
+                )
+            )
+
+        if not save_clicked:
+            return
+
+        if existing_row is None:
+            st.error(
+                "Data Manuver Aktif tidak ditemukan."
+            )
+            return
+
+        errors = (
+            _validate_three_phase_current(
+                current_r=load_current_before_r,
+                current_s=load_current_before_s,
+                current_t=load_current_before_t,
+                label="Arus Beban Sebelum Manuver",
+                required=False,
+            )
+        )
+
+        errors.extend(
+            _validate_supply_data(
+                event_date=event_date,
+                event_time=event_time,
+                load_current_before_r=(
+                    _optional_float(
+                        load_current_before_r
+                    )
+                ),
+                load_current_before_s=(
+                    _optional_float(
+                        load_current_before_s
+                    )
+                ),
+                load_current_before_t=(
+                    _optional_float(
+                        load_current_before_t
+                    )
+                ),
+                load_current_before=_safe_float(
+                    load_current_before
+                ),
+                supply_data=(
+                    supply_data
+                ),
+            )
+        )
+
+        if errors:
+            for error in errors:
+                st.error(
+                    error
+                )
+
+            return
+
+        user_id = (
+            get_current_user_id()
+        )
+
+        if user_id is None:
+            st.error(
+                "Session login tidak valid."
+            )
+            return
+
+        event_id = str(
+            existing_row.get(
+                "event_id"
+            )
+            or ""
+        )
+
+        update_payload = (
+            _build_supply_payload(
+                supply_data
+            )
+        )
+
+        update_payload[
+            "recovery_description"
+        ] = (
+            recovery_description.strip()
+            or None
+        )
+
+        update_payload[
+            "updated_by"
+        ] = user_id
+
+        try:
+            with st.spinner(
+                "Menyimpan pemulihan Manuver..."
+            ):
+                updated_event = (
+                    update_event_recovery(
+                        event_id=event_id,
+                        payload=update_payload,
+                    )
+                )
+
+            existing_hierarchy: dict[
+                str,
+                Any,
+            ] = {
+                "ultg_name":
+                    existing_row.get(
+                        "ultg_name"
+                    ),
+
+                "gi_name":
+                    existing_row.get(
+                        "gi_name"
+                    ),
+
+                "gi_flc":
+                    existing_row.get(
+                        "gi_flc"
+                    ),
+
+                "functloc_id":
+                    existing_row.get(
+                        "functloc_id"
+                    ),
+
+                "bay_name":
+                    existing_row.get(
+                        "bay_name"
+                    ),
+
+                "penyulang_id":
+                    existing_row.get(
+                        "penyulang_id"
+                    ),
+
+                "penyulang_code":
+                    existing_row.get(
+                        "penyulang_code"
+                    ),
+
+                "penyulang_name":
+                    existing_row.get(
+                        "penyulang_name"
+                    ),
+
+                "wilayah_penyaluran":
+                    existing_row.get(
+                        "wilayah_penyaluran"
+                    ),
+
+                "up3_code":
+                    existing_row.get(
+                        "up3_code"
+                    ),
+
+                "ulp_code":
+                    existing_row.get(
+                        "ulp_code"
+                    ),
+            }
+
+            recovery_cause_name = str(
+                existing_row.get(
+                    "cause_name"
+                )
+                or existing_row.get(
+                    "cause_code"
+                )
+                or "TANPA KLASIFIKASI"
+            )
+
+            drive_count, drive_errors = (
+                drive_service.upload_evidence_files(
+                    uploaded_files=list(
+                        evidence
+                        or []
+                    ),
+                    event_id=event_id,
+                    event_type="MANUVER",
+                    hierarchy=existing_hierarchy,
+                    event_date=str(
+                        existing_row.get(
+                            "event_date"
+                        )
+                        or event_date.isoformat()
+                    ),
+                    event_time=str(
+                        existing_row.get(
+                            "event_time"
+                        )
+                        or event_time.isoformat()
+                    ),
+                    cause_name=(
+                        recovery_cause_name
+                    ),
+                )
+            )
+
+            latest_event_row = (
+                get_event_by_id(
+                    event_id
+                )
+                or existing_row
+            )
+
+            telegram_ok, telegram_message = (
+                telegram_service.send_recovery_notification(
+                    event_id=event_id,
+                    event_row=latest_event_row,
+                    recovery_payload=(
+                        update_payload
+                    ),
+                    uploaded_files=list(
+                        evidence
+                        or []
+                    ),
+                )
+            )
+
+            st.session_state[
+                "gangguan_active_telegram_flash"
+            ] = (
+                (
+                    "📨 "
+                    + telegram_message
+                )
+                if telegram_ok
+                else (
+                    "⚠️ Telegram pemulihan gagal: "
+                    + telegram_message
+                )
+            )
+
+            if drive_errors:
+                st.session_state[
+                    "gangguan_active_drive_flash"
+                ] = (
+                    "Sebagian evidence gagal diarsipkan "
+                    "ke Google Drive: "
+                    + " | ".join(
+                        drive_errors
+                    )
+                )
+
+            elif drive_count > 0:
+                st.session_state[
+                    "gangguan_active_drive_flash"
+                ] = (
+                    f"{drive_count} evidence berhasil "
+                    "diarsipkan ke Google Drive."
+                )
+
+            updated_status = str(
+                updated_event.get(
+                    "record_status"
+                )
+                or ""
+            )
+
+            if (
+                updated_status
+                == "RECOVERED"
+            ):
+                st.session_state[
+                    "gangguan_active_flash"
+                ] = (
+                    "Pemulihan Manuver berhasil disimpan. "
+                    "Manuver telah berstatus RECOVERED."
+                )
+
+            else:
+                st.session_state[
+                    "gangguan_active_flash"
+                ] = (
+                    "Update pemulihan Manuver berhasil disimpan. "
+                    "Manuver masih berstatus ONGOING."
+                )
+
+            _return_to_source()
+
+        except Exception as exc:
+            error_text = str(
+                exc
+            )
+
+            if (
+                "EVENT_PERIOD_ALREADY_APPROVED"
+                in error_text
+                or "EVENT_LOCKED_BY_APPROVED_MONTHLY_REPORT"
+                in error_text
+            ):
+                st.error(
+                    "Data tidak dapat diubah karena Laporan Bulanan "
+                    "pada periode tersebut sudah Terverifikasi."
+                )
+
+                st.caption(
+                    "Silakan hubungi Evaluator / Admin / Super Admin "
+                    "untuk mengembalikan Laporan Bulanan ke Draft."
+                )
+
+            else:
+                st.error(
+                    "Pemulihan Manuver gagal disimpan."
+                )
+
+                st.exception(
+                    exc
+                )
+
+        return
 
     # ======================================================
     # UPDATE HISTORY MANUVER
@@ -6824,18 +7222,6 @@ def _render_manuver_form(
                 "created_by_name"
             ] = created_by_name
 
-            # Recovery hanya dianggap ada apabila PMT benar-benar
-            # MASUK atau MASUK_TRIP. Pemulihan suplai/manuver saja
-            # dengan PMT BELUM tidak memicu Telegram Pemulihan.
-            has_direct_recovery = (
-                telegram_service.has_pmt_recovery(
-                    payload
-                )
-            )
-
-            # Jika recovery diisi pada submit CREATE yang sama,
-            # Manuver + Pemulihan dikirim menjadi SATU bubble,
-            # sama seperti perlakuan pada Gangguan.
             telegram_ok, telegram_message = (
                 telegram_service.send_event_notification(
                     event_id=event_id,
@@ -6851,11 +7237,6 @@ def _render_manuver_form(
                     uploaded_files=list(
                         evidence
                         or []
-                    ),
-                    recovery_payload=(
-                        payload
-                        if has_direct_recovery
-                        else None
                     ),
                 )
             )
@@ -7637,7 +8018,7 @@ def render_page() -> None:
 
         except Exception as exc:
             st.error(
-                "Data Gangguan Aktif tidak dapat dibaca."
+                "Data Kejadian Aktif tidak dapat dibaca."
             )
 
             st.exception(
@@ -7647,7 +8028,7 @@ def render_page() -> None:
 
         if existing_row is None:
             st.error(
-                "Data Gangguan Aktif tidak ditemukan."
+                "Data Kejadian Aktif tidak ditemukan."
             )
             return
 
@@ -7656,29 +8037,43 @@ def render_page() -> None:
                 "event_type_code"
             )
             or ""
-        )
+        ).strip().upper()
 
-        if (
-            event_type
-            != "GANGGUAN"
-        ):
+        if event_type not in {
+            "GANGGUAN",
+            "MANUVER",
+        }:
             st.error(
-                "Mode Pemulihan dari Gangguan Aktif "
-                "hanya dapat membuka Gangguan."
+                "Jenis operasi pada Kejadian Aktif "
+                "tidak dikenali."
             )
             return
 
-        _prepare_gangguan_existing_state(
-            event_id=(
-                edit_event_id
-            ),
-            row=(
-                existing_row
-            ),
-            prefix=(
-                "update_gangguan"
-            ),
-        )
+        if event_type == "GANGGUAN":
+            _prepare_gangguan_existing_state(
+                event_id=(
+                    edit_event_id
+                ),
+                row=(
+                    existing_row
+                ),
+                prefix=(
+                    "update_gangguan"
+                ),
+            )
+
+        else:
+            _prepare_manuver_existing_state(
+                event_id=(
+                    edit_event_id
+                ),
+                row=(
+                    existing_row
+                ),
+                prefix=(
+                    "update_manuver"
+                ),
+            )
 
         if st.button(
             "← Kembali ke Gangguan Aktif",
@@ -7689,8 +8084,15 @@ def render_page() -> None:
             _return_to_source()
             return
 
+        operation_label = (
+            "Gangguan"
+            if event_type
+            == "GANGGUAN"
+            else "Manuver"
+        )
+
         st.title(
-            "Pemulihan & Normalisasi Gangguan"
+            f"Pemulihan & Normalisasi {operation_label}"
         )
 
         st.caption(
@@ -7705,11 +8107,20 @@ def render_page() -> None:
         with st.container(
             border=True
         ):
-            col_1, col_2, col_3 = (
-                st.columns(3)
+            col_type, col_status, col_supply, col_pmt = (
+                st.columns(4)
             )
 
-            with col_1:
+            with col_type:
+                st.caption(
+                    "Jenis Operasi"
+                )
+
+                st.write(
+                    f"**{operation_label}**"
+                )
+
+            with col_status:
                 st.caption(
                     "Status Record"
                 )
@@ -7718,31 +8129,41 @@ def render_page() -> None:
                     f"**{existing_row.get('record_status_name') or existing_row.get('record_status') or '-'}**"
                 )
 
-            with col_2:
+            with col_supply:
                 st.caption(
                     "Status Suplai Saat Ini"
                 )
 
                 st.write(
-                    f"**{existing_row.get('supply_status_name') or '-'}**"
+                    f"**{existing_row.get('supply_status_name') or existing_row.get('supply_status_code') or '-'}**"
                 )
 
-            with col_3:
+            with col_pmt:
                 st.caption(
                     "Status PMT Saat Ini"
                 )
 
                 st.write(
-                    f"**{existing_row.get('recovery_status_name') or 'Belum Normal'}**"
+                    f"**{existing_row.get('recovery_status_name') or existing_row.get('recovery_status_code') or 'Belum Normal'}**"
                 )
 
-        _render_gangguan_form(
-            mode="UPDATE",
-            selected=None,
-            existing_row=(
-                existing_row
-            ),
-        )
+        if event_type == "GANGGUAN":
+            _render_gangguan_form(
+                mode="UPDATE",
+                selected=None,
+                existing_row=(
+                    existing_row
+                ),
+            )
+
+        else:
+            _render_manuver_form(
+                mode="UPDATE",
+                selected=None,
+                existing_row=(
+                    existing_row
+                ),
+            )
 
         return
 
