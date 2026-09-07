@@ -6824,6 +6824,18 @@ def _render_manuver_form(
                 "created_by_name"
             ] = created_by_name
 
+            # Recovery hanya dianggap ada apabila PMT benar-benar
+            # MASUK atau MASUK_TRIP. Pemulihan suplai/manuver saja
+            # dengan PMT BELUM tidak memicu Telegram Pemulihan.
+            has_direct_recovery = (
+                telegram_service.has_pmt_recovery(
+                    payload
+                )
+            )
+
+            # Jika recovery diisi pada submit CREATE yang sama,
+            # Manuver + Pemulihan dikirim menjadi SATU bubble,
+            # sama seperti perlakuan pada Gangguan.
             telegram_ok, telegram_message = (
                 telegram_service.send_event_notification(
                     event_id=event_id,
@@ -6839,6 +6851,11 @@ def _render_manuver_form(
                     uploaded_files=list(
                         evidence
                         or []
+                    ),
+                    recovery_payload=(
+                        payload
+                        if has_direct_recovery
+                        else None
                     ),
                 )
             )
